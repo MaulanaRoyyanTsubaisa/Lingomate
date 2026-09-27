@@ -1,0 +1,7 @@
+{
+  "app": "lingomate",
+  "enabled": true,
+  "branch": "main",
+  "stack": "nextjs-prisma-postgres",
+  "profile": "default"
+}
