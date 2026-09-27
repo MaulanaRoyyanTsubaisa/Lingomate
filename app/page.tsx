@@ -153,7 +153,7 @@ export default function Page(){
  const [lesson,setLesson]=useState<Lesson|null>(null),[learnTab,setLearnTab]=useState<"path"|"guide">("path");
  const [mode,setMode]=useState<Mode>("grammar"),[qi,setQi]=useState(0),[picked,setPicked]=useState<string|null>(null);
  const [writing,setWriting]=useState(""),[writingResult,setWritingResult]=useState<{corrected:string;reason:string}|null>(null);
- const [input,setInput]=useState(""),[mic,setMic]=useState(false),[search,setSearch]=useState("");
+ const [input,setInput]=useState(""),[mic,setMic]=useState(false),[search,setSearch]=useState("");\n const [aiBusy,setAiBusy]=useState(false),[aiProvider,setAiProvider]=useState("local");
  const end=useRef<HTMLDivElement|null>(null);
 
  useEffect(()=>{try{const raw=localStorage.getItem("lingomate-v2");if(raw)setS({...DEFAULT,...JSON.parse(raw)});}catch{};if("serviceWorker"in navigator)navigator.serviceWorker.getRegistrations().then(x=>x.forEach(r=>r.unregister())).catch(()=>{});setReady(true)},[]);
@@ -173,14 +173,38 @@ export default function Page(){
  function speak(text:string,lang=s.lang){if(!("speechSynthesis"in window))return;const u=new SpeechSynthesisUtterance(text);u.lang=lang==="zh"?"zh-CN":"en-US";u.rate=lang==="zh"?.82:.9;speechSynthesis.cancel();speechSynthesis.speak(u)}
  function listen(){const W=window as any,R=W.SpeechRecognition||W.webkitSpeechRecognition;if(!R)return alert("Gunakan Chrome/Edge untuk voice input.");const r=new R();r.lang=s.lang==="zh"?"zh-CN":"en-US";setMic(true);r.onresult=(e:any)=>{setInput(e.results[0][0].transcript);setMic(false)};r.onerror=()=>setMic(false);r.onend=()=>setMic(false);r.start()}
  function answer(choice:string){if(picked)return;setPicked(choice);const ok=choice===q.answer;setS(v=>({...v,answered:v.answered+1,correct:v.correct+(ok?1:0),xp:v.xp+(ok?10:3)}));if(!ok)addMistake(q.prompt,q.answer||"",q.why,"Practice · "+mode)}
- function checkWriting(){if(!writing.trim())return;const r=s.lang==="en"?correctEnglish(writing):correctChinese(writing);setWritingResult(r);if(r.reason&&r.corrected.trim()!==writing.trim())addMistake(writing,r.corrected,r.reason,"Writing");setS(v=>({...v,xp:v.xp+5}))}
- function send(){
-  const text=input.trim();if(!text)return;
-  const r=s.lang==="en"?correctEnglish(text):correctChinese(text),changed=!!r.reason&&r.corrected.trim()!==text.trim();
-  if(changed)addMistake(text,r.corrected,r.reason,"Conversation");
-  const user:Chat={id:id(),role:"user",text}, tutorText=changed?(s.lang==="en"?"I understood you. A more natural version is: "+r.corrected+" ":"更自然可以说："+r.corrected+"。 ")+follow(s.lang,s.convo):follow(s.lang,s.convo);
-  const tutor:Chat={id:id(),role:"tutor",text:tutorText,correction:changed?{original:text,corrected:r.corrected,reason:r.reason}:undefined};
-  setS(v=>({...v,chat:[...v.chat,user,tutor],xp:v.xp+5}));setInput("");setTimeout(()=>speak(tutorText),100);
+ async function checkWriting(){
+  const text=writing.trim();if(!text||aiBusy)return;setAiBusy(true);
+  try{
+   const res=await fetch("/api/tutor",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({task:"writing",lang:s.lang,level,mode:"writing",message:text,history:[]})});
+   if(!res.ok)throw new Error("ai_unavailable");
+   const data=await res.json();setAiProvider(data.provider||"ai");
+   const c=data.correction,result={corrected:c?.needed?c.corrected:text,reason:c?.needed?c.reason:""};
+   setWritingResult(result);if(c?.needed)addMistake(text,c.corrected,c.reason,"Writing · "+(c.category||"Correction"));
+  }catch{
+   const r=s.lang==="en"?correctEnglish(text):correctChinese(text);setWritingResult(r);
+   if(r.reason&&r.corrected.trim()!==text)addMistake(text,r.corrected,r.reason,"Writing · local");setAiProvider("local");
+  }finally{setS(v=>({...v,xp:v.xp+5}));setAiBusy(false)}
+ }
+ async function send(){
+  const text=input.trim();if(!text||aiBusy)return;
+  const history=s.chat.slice(-10).map(x=>({role:x.role,text:x.text})),user:Chat={id:id(),role:"user",text};
+  setS(v=>({...v,chat:[...v.chat,user],xp:v.xp+5}));setInput("");setAiBusy(true);
+  try{
+   const res=await fetch("/api/tutor",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({task:"conversation",lang:s.lang,level,mode:s.convo,message:text,history})});
+   if(!res.ok)throw new Error("ai_unavailable");
+   const data=await res.json();setAiProvider(data.provider||"ai");
+   const c=data.correction,changed=Boolean(c?.needed&&c.corrected);
+   if(changed)addMistake(text,c.corrected,c.reason,"Conversation · "+(c.category||"Correction"));
+   const tutor:Chat={id:id(),role:"tutor",text:data.reply||follow(s.lang,s.convo),correction:changed?{original:c.original||text,corrected:c.corrected,reason:c.reason}:undefined};
+   setS(v=>({...v,chat:[...v.chat,tutor]}));setTimeout(()=>speak(tutor.text),100);
+  }catch{
+   const r=s.lang==="en"?correctEnglish(text):correctChinese(text),changed=!!r.reason&&r.corrected.trim()!==text;
+   if(changed)addMistake(text,r.corrected,r.reason,"Conversation · local");
+   const tutorText=changed?(s.lang==="en"?"A more natural version is: "+r.corrected+" ":"更自然可以说："+r.corrected+"。 ")+follow(s.lang,s.convo):follow(s.lang,s.convo);
+   const tutor:Chat={id:id(),role:"tutor",text:tutorText,correction:changed?{original:text,corrected:r.corrected,reason:r.reason}:undefined};
+   setS(v=>({...v,chat:[...v.chat,tutor]}));setAiProvider("local");setTimeout(()=>speak(tutorText),100);
+  }finally{setAiBusy(false)}
  }
  function ensureChat(){if(s.chat.length)return;const text=s.lang==="en"?"Hi Royyan. Speak naturally. I will correct useful mistakes, not interrupt every sentence. "+follow("en",s.convo):"你好 Royyan。自然地说就可以，我会帮你改重要的错误。 "+follow("zh",s.convo);setS(v=>({...v,chat:[{id:id(),role:"tutor",text}]}))}
  useEffect(()=>{if(s.view==="talk")ensureChat()},[s.view,s.lang,s.convo]);
@@ -214,13 +238,13 @@ export default function Page(){
    {s.view==="practice"&&q&&<section className="page">
     <div className="tabs modes">{(["grammar","vocab","reading","listening","writing"] as Mode[]).map(x=><button key={x} className={mode===x?"active":""} onClick={()=>{setMode(x);setQi(0);setPicked(null);setWritingResult(null)}}>{x}</button>)}</div>
     <div className="practice"><article className="question"><div className="meta"><span>{q.level}</span><span>{mode.toUpperCase()}</span><span>{(qi%qs.length)+1}/{qs.length}</span></div>{mode==="listening"&&<button className="listen" onClick={()=>speak(q.audio||"")}>▶ Listen to prompt</button>}<h2>{q.prompt}</h2>
-     {mode==="writing"?<><textarea value={writing} onChange={e=>setWriting(e.target.value)} placeholder={s.lang==="en"?"Example: I is work in Karawang every day":"例如：我是很忙，但是我学习中文"}/><button className="primary" onClick={checkWriting}>Check my writing</button>{writingResult&&<div className={"feedback "+(writingResult.reason?"bad":"good")}><b>{writingResult.reason?"Correction":"Looks good ✓"}</b><p>{writingResult.corrected}</p>{writingResult.reason&&<small>{writingResult.reason}</small>}</div>}</>
+     {mode==="writing"?<><textarea value={writing} onChange={e=>setWriting(e.target.value)} placeholder={s.lang==="en"?"Example: I is work in Karawang every day":"例如：我是很忙，但是我学习中文"}/><button className="primary" disabled={aiBusy} onClick={checkWriting}>{aiBusy?"AI checking…":"Check my writing"}</button>{writingResult&&<div className={"feedback "+(writingResult.reason?"bad":"good")}><b>{writingResult.reason?"Correction":"Looks good ✓"}</b><p>{writingResult.corrected}</p>{writingResult.reason&&<small>{writingResult.reason}</small>}</div>}</>
      :<><div className="choices">{q.choices?.map((x,i)=>{const cls=picked?(x===q.answer?"correct":x===picked?"wrong":""):"";return <button className={cls} disabled={!!picked} key={x} onClick={()=>answer(x)}><span>{String.fromCharCode(65+i)}</span>{x}</button>})}</div>{picked&&<div className={"feedback "+(picked===q.answer?"good":"bad")}><div><b>{picked===q.answer?"Correct ✓":"Not quite"}</b><p>{q.why}</p></div><button onClick={()=>{setQi(v=>v+1);setPicked(null)}}>Next →</button></div>}</>}
     </article><aside className="practiceSide"><div><small>SESSION ACCURACY</small><b>{accuracy}%</b><p>{s.correct} correct from {s.answered} answered</p></div><div><small>WHY THIS MATTERS</small><p>{s.lang==="en"?"Test-style questions build recognition; explanations build understanding.":"先理解句型，再反复练习。错误会自动进入复习本。"}</p></div></aside></div>
    </section>}
 
    {s.view==="talk"&&<section className="page talkPage">
-    <div className="tabs modes">{(["daily","work","travel","interview"] as State["convo"][]).map(x=><button key={x} className={s.convo===x?"active":""} onClick={()=>update({convo:x,chat:[]})}>{x}</button>)}</div><div className="talk"><article className="chat"><div className="chatHead"><span>LM</span><p><b>Conversation Tutor</b><small>Natural corrections · {s.convo}</small></p><i>● live</i></div><div className="messages">{s.chat.map(m=><div key={m.id} className={"message "+m.role}><p>{m.text}</p>{m.correction&&<div className="correction"><small>CORRECTION</small><s>{m.correction.original}</s><b>{m.correction.corrected}</b><em>{m.correction.reason}</em></div>}</div>)}<div ref={end}/></div><div className="composer"><button className={mic?"on":""} onClick={listen}>{mic?"●":"🎙"}</button><input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&send()} placeholder={s.lang==="en"?"Type or speak naturally…":"输入中文或点击麦克风说话…"}/><button onClick={send}>Send</button></div></article><aside className="coach"><small>LIVE COACH</small><h3>Speak first. Study the correction second.</h3><p>The tutor keeps the conversation moving and saves useful mistakes.</p><div><span>Conversation mistakes</span><b>{s.mistakes.filter(m=>m.category==="Conversation").length}</b></div><button onClick={()=>nav("review")}>Open error notebook →</button></aside></div>
+    <div className="tabs modes">{(["daily","work","travel","interview"] as State["convo"][]).map(x=><button key={x} className={s.convo===x?"active":""} onClick={()=>update({convo:x,chat:[]})}>{x}</button>)}</div><div className="talk"><article className="chat"><div className="chatHead"><span>LM</span><p><b>Conversation Tutor</b><small>Natural corrections · {s.convo}</small></p><i>● {aiBusy?"thinking":aiProvider}</i></div><div className="messages">{s.chat.map(m=><div key={m.id} className={"message "+m.role}><p>{m.text}</p>{m.correction&&<div className="correction"><small>CORRECTION</small><s>{m.correction.original}</s><b>{m.correction.corrected}</b><em>{m.correction.reason}</em></div>}</div>)}<div ref={end}/></div><div className="composer"><button className={mic?"on":""} onClick={listen}>{mic?"●":"🎙"}</button><input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&send()} placeholder={s.lang==="en"?"Type or speak naturally…":"输入中文或点击麦克风说话…"}/><button disabled={aiBusy} onClick={send}>{aiBusy?"…":"Send"}</button></div></article><aside className="coach"><small>LIVE COACH</small><h3>Speak first. Study the correction second.</h3><p>The tutor keeps the conversation moving and saves useful mistakes.</p><div><span>Conversation mistakes</span><b>{s.mistakes.filter(m=>m.category==="Conversation").length}</b></div><button onClick={()=>nav("review")}>Open error notebook →</button></aside></div>
    </section>}
 
    {s.view==="review"&&<section className="page"><div className="reviewHead"><div><small>PERSONAL ERROR NOTEBOOK</small><h2>Your mistakes are your syllabus.</h2><p>Wrong answers, writing corrections, and conversation mistakes collect here automatically.</p></div><aside><b>{s.mistakes.filter(m=>!m.mastered).length}</b><span>active cards</span></aside></div>{s.mistakes.length===0?<div className="empty"><b>✓</b><h3>No mistakes yet</h3><p>Practice or talk with the tutor. Corrections will appear here.</p><button className="primary" onClick={()=>nav("practice")}>Start practice</button></div>:<div className="mistakes">{s.mistakes.map(m=><article className={m.mastered?"mastered":""} key={m.id}><header><span>{m.category}</span><small>{m.mastered?"MASTERED":"REVIEW"}</small></header><s>{m.source}</s><b>→ {m.correction}</b><p>{m.reason}</p><footer><button onClick={()=>speak(m.correction)}>🔊 Listen</button><button onClick={()=>setS(v=>({...v,mistakes:v.mistakes.map(x=>x.id===m.id?{...x,mastered:!x.mastered}:x)}))}>{m.mastered?"Return to review":"Mark mastered ✓"}</button></footer></article>)}</div>}</section>}
